@@ -175,6 +175,15 @@ struct const_fixed_hasher : ggc_cache_ptr_hash<rtx_def>
 
 static GTY ((cache)) hash_table<const_fixed_hasher> *const_fixed_htab;
 
+/* A hash table storing unique CONSTs.  */
+struct const_hasher : ggc_cache_ptr_hash<rtx_def>
+{
+  static hashval_t hash (rtx x);
+  static bool equal (rtx x, rtx y);
+};
+
+static GTY ((cache)) hash_table<const_hasher> *const_htab;
+
 #define cur_insn_uid (crtl->emit.x_cur_insn_uid)
 #define cur_debug_insn_uid (crtl->emit.x_cur_debug_insn_uid)
 #define first_label_num (crtl->emit.x_first_label_num)
@@ -307,6 +316,28 @@ const_fixed_hasher::equal (rtx x, rtx y)
   if (GET_MODE (a) != GET_MODE (b))
     return 0;
   return fixed_identical (CONST_FIXED_VALUE (a), CONST_FIXED_VALUE (b));
+}
+
+/* Returns a hash code for X (which is either an existing unique CONST
+   or an operand to gen_rtx_CONST).  */
+
+hashval_t
+const_hasher::hash (rtx x)
+{
+  if (GET_CODE (x) == CONST)
+    x = XEXP (x, 0);
+
+  int do_not_record_p = 0;
+  return hash_rtx (x, GET_MODE (x), &do_not_record_p, NULL, false);
+}
+
+/* Returns true if the operand of unique CONST X is equal to Y.  */
+
+bool
+const_hasher::equal (rtx x, rtx y)
+{
+  gcc_checking_assert (GET_CODE (x) == CONST);
+  return rtx_equal_p (XEXP (x, 0), y);
 }
 
 /* Return true if the given memory attributes are equal.  */
@@ -5855,16 +5886,55 @@ init_emit (void)
 #endif
 }
 
+rtx
+gen_rtx_CONST (machine_mode mode, rtx val)
+{
+  if (unique_const_p (val))
+    {
+      /* Look up the CONST in the hash table.  */
+      rtx *slot = const_htab->find_slot (val, INSERT);
+      if (*slot == 0)
+	*slot = gen_rtx_raw_CONST (mode, val);
+      return *slot;
+    }
+
+  return gen_rtx_raw_CONST (mode, val);
+}
+
+/* Temporary rtx used by gen_const_vec_duplicate_1.  */
+static GTY((deletable)) rtx spare_vec_duplicate;
+
 /* Like gen_const_vec_duplicate, but ignore const_tiny_rtx.  */
 
 static rtx
 gen_const_vec_duplicate_1 (machine_mode mode, rtx el)
 {
-  int nunits = GET_MODE_NUNITS (mode);
-  rtvec v = rtvec_alloc (nunits);
-  for (int i = 0; i < nunits; ++i)
-    RTVEC_ELT (v, i) = el;
-  return gen_rtx_raw_CONST_VECTOR (mode, v);
+  int nunits;
+  if (GET_MODE_NUNITS (mode).is_constant (&nunits))
+    {
+      rtvec v = rtvec_alloc (nunits);
+
+      for (int i = 0; i < nunits; ++i)
+	RTVEC_ELT (v, i) = el;
+
+      return gen_rtx_raw_CONST_VECTOR (mode, v);
+    }
+  else
+    {
+      if (spare_vec_duplicate)
+	{
+	  PUT_MODE (spare_vec_duplicate, mode);
+	  XEXP (spare_vec_duplicate, 0) = el;
+	}
+      else
+	spare_vec_duplicate = gen_rtx_VEC_DUPLICATE (mode, el);
+
+      rtx res = gen_rtx_CONST (mode, spare_vec_duplicate);
+      if (XEXP (res, 0) == spare_vec_duplicate)
+	spare_vec_duplicate = NULL_RTX;
+
+      return res;
+    }
 }
 
 /* Generate a vector constant of mode MODE in which every element has
@@ -5926,20 +5996,45 @@ const_vec_series_p_1 (const_rtx x, rtx *base_out, rtx *step_out)
   return true;
 }
 
+/* Temporary rtx used by gen_const_vec_series.  */
+static GTY((deletable)) rtx spare_vec_series;
+
 /* Generate a vector constant of mode MODE in which element I has
    the value BASE + I * STEP.  */
 
 rtx
 gen_const_vec_series (machine_mode mode, rtx base, rtx step)
 {
-  int nunits = GET_MODE_NUNITS (mode);
-  rtvec v = rtvec_alloc (nunits);
-  scalar_mode inner_mode = GET_MODE_INNER (mode);
-  RTVEC_ELT (v, 0) = base;
-  for (int i = 1; i < nunits; ++i)
-    RTVEC_ELT (v, i) = simplify_gen_binary (PLUS, inner_mode,
-					    RTVEC_ELT (v, i - 1), step);
-  return gen_rtx_raw_CONST_VECTOR (mode, v);
+  gcc_assert (CONSTANT_P (base) && CONSTANT_P (step));
+
+  int nunits;
+  if (GET_MODE_NUNITS (mode).is_constant (&nunits))
+    {
+      rtvec v = rtvec_alloc (nunits);
+      scalar_mode inner_mode = GET_MODE_INNER (mode);
+      RTVEC_ELT (v, 0) = base;
+      for (int i = 1; i < nunits; ++i)
+	RTVEC_ELT (v, i) = simplify_gen_binary (PLUS, inner_mode,
+						RTVEC_ELT (v, i - 1), step);
+      return gen_rtx_raw_CONST_VECTOR (mode, v);
+    }
+  else
+    {
+      if (spare_vec_series)
+	{
+	  PUT_MODE (spare_vec_series, mode);
+	  XEXP (spare_vec_series, 0) = base;
+	  XEXP (spare_vec_series, 1) = step;
+	}
+      else
+	spare_vec_series = gen_rtx_VEC_SERIES (mode, base, step);
+
+      rtx res = gen_rtx_CONST (mode, spare_vec_series);
+      if (XEXP (res, 0) == spare_vec_series)
+	spare_vec_series = NULL_RTX;
+
+      return res;
+    }
 }
 
 /* Generate a vector of mode MODE in which element I has the value
@@ -5977,7 +6072,7 @@ gen_const_vector (machine_mode mode, int constant)
 rtx
 gen_rtx_CONST_VECTOR (machine_mode mode, rtvec v)
 {
-  gcc_assert (GET_MODE_NUNITS (mode) == GET_NUM_ELEM (v));
+  gcc_assert (must_eq (GET_MODE_NUNITS (mode), GET_NUM_ELEM (v)));
 
   /* If the values are all the same, check to see if we can use one of the
      standard constant vectors.  */
@@ -6096,6 +6191,8 @@ init_emit_once (void)
   const_fixed_htab = hash_table<const_fixed_hasher>::create_ggc (37);
 
   reg_attrs_htab = hash_table<reg_attr_hasher>::create_ggc (37);
+
+  const_htab = hash_table<const_hasher>::create_ggc (37);
 
 #ifdef INIT_EXPANDERS
   /* This is to initialize {init|mark|free}_machine_status before the first
