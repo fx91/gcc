@@ -5723,7 +5723,7 @@ arc_arg_partial_bytes (cumulative_args_t cum_v, machine_mode mode,
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
   int bytes = (mode == BLKmode
-	       ? int_size_in_bytes (type) : (int) GET_MODE_SIZE (mode));
+	       ? int_size_in_bytes_hwi (type) : (int) GET_MODE_SIZE (mode));
   int words = (bytes + UNITS_PER_WORD - 1) / UNITS_PER_WORD;
   int arg_num = *cum;
   int ret;
@@ -5830,7 +5830,7 @@ arc_function_arg_advance (cumulative_args_t cum_v,
 {
   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
   int bytes = (mode == BLKmode
-	       ? int_size_in_bytes (type) : (int) GET_MODE_SIZE (mode));
+	       ? int_size_in_bytes_hwi (type) : (int) GET_MODE_SIZE (mode));
   int words = (bytes + UNITS_PER_WORD  - 1) / UNITS_PER_WORD;
   int i;
 
@@ -6861,7 +6861,7 @@ arc_return_in_memory (const_tree type, const_tree fntype ATTRIBUTE_UNUSED)
     return true;
   else
     {
-      HOST_WIDE_INT size = int_size_in_bytes (type);
+      HOST_WIDE_INT size = int_size_in_bytes_hwi (type);
       return (size == -1 || size > (TARGET_V2 ? 16 : 8));
     }
 }
@@ -7769,7 +7769,7 @@ arc_in_small_data_p (const_tree decl)
      section.  */
   else if (TREE_PUBLIC (decl))
     {
-      size = int_size_in_bytes (TREE_TYPE (decl));
+      size = int_size_in_bytes_hwi (TREE_TYPE (decl));
       return (size > 0 && size <= g_switch_value);
     }
   return false;
