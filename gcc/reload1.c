@@ -200,7 +200,7 @@ static int last_spill_reg;
 static rtx spill_stack_slot[FIRST_PSEUDO_REGISTER];
 
 /* Width allocated so far for that stack slot.  */
-static unsigned int spill_stack_slot_width[FIRST_PSEUDO_REGISTER];
+static poly_int64 spill_stack_slot_width[FIRST_PSEUDO_REGISTER];
 
 /* Record which pseudos needed to be spilled.  */
 static regset_head spilled_pseudos;
@@ -2142,10 +2142,10 @@ alter_reg (int i, int from_reg, bool dont_share_p)
     {
       rtx x = NULL_RTX;
       machine_mode mode = GET_MODE (regno_reg_rtx[i]);
-      unsigned int inherent_size = PSEUDO_REGNO_BYTES (i);
+      poly_int64 inherent_size = GET_MODE_SIZE (mode);
       unsigned int inherent_align = GET_MODE_ALIGNMENT (mode);
       machine_mode wider_mode = wider_subreg_mode (mode, reg_max_ref_mode[i]);
-      unsigned int total_size = GET_MODE_SIZE (wider_mode);
+      poly_int64 total_size = GET_MODE_SIZE (wider_mode);
       /* ??? Seems strange to derive the minimum alignment from the size,
 	 but that's the traditional behavior.  For polynomial-size modes,
 	 the natural extension is to use the minimum possible size.  */
@@ -2179,9 +2179,11 @@ alter_reg (int i, int from_reg, bool dont_share_p)
 	  rtx stack_slot;
 
 	  /* No known place to spill from => no slot to reuse.  */
+	  gcc_checking_assert (ordered_p (total_size, inherent_size));
 	  x = assign_stack_local (mode, total_size,
 				  min_align > inherent_align
-				  || total_size > inherent_size ? -1 : 0);
+				  || may_gt (total_size, inherent_size)
+				  ? -1 : 0);
 
 	  stack_slot = x;
 
@@ -2193,7 +2195,7 @@ alter_reg (int i, int from_reg, bool dont_share_p)
 	      adjust = inherent_size - total_size;
 	      if (may_ne (adjust, 0))
 		{
-		  unsigned int total_bits = total_size * BITS_PER_UNIT;
+		  poly_uint64 total_bits = total_size * BITS_PER_UNIT;
 		  machine_mode mem_mode
 		    = int_mode_for_size (total_bits, 1).else_blk ();
 		  stack_slot = adjust_address_nv (x, mem_mode, adjust);
@@ -2207,9 +2209,10 @@ alter_reg (int i, int from_reg, bool dont_share_p)
 
       /* Reuse a stack slot if possible.  */
       else if (spill_stack_slot[from_reg] != 0
-	       && spill_stack_slot_width[from_reg] >= total_size
-	       && (GET_MODE_SIZE (GET_MODE (spill_stack_slot[from_reg]))
-		   >= inherent_size)
+	       && must_ge (spill_stack_slot_width[from_reg], total_size)
+	       && must_ge (GET_MODE_SIZE
+			   (GET_MODE (spill_stack_slot[from_reg])),
+			   inherent_size)
 	       && MEM_ALIGN (spill_stack_slot[from_reg]) >= min_align)
 	x = spill_stack_slot[from_reg];
 
@@ -2225,16 +2228,18 @@ alter_reg (int i, int from_reg, bool dont_share_p)
 	      if (partial_subreg_p (mode,
 				    GET_MODE (spill_stack_slot[from_reg])))
 		mode = GET_MODE (spill_stack_slot[from_reg]);
-	      if (spill_stack_slot_width[from_reg] > total_size)
-		total_size = spill_stack_slot_width[from_reg];
+	      total_size = ordered_max (total_size,
+					spill_stack_slot_width[from_reg]);
 	      if (MEM_ALIGN (spill_stack_slot[from_reg]) > min_align)
 		min_align = MEM_ALIGN (spill_stack_slot[from_reg]);
 	    }
 
 	  /* Make a slot with that size.  */
+	  gcc_checking_assert (ordered_p (total_size, inherent_size));
 	  x = assign_stack_local (mode, total_size,
 				  min_align > inherent_align
-				  || total_size > inherent_size ? -1 : 0);
+				  || may_gt (total_size, inherent_size)
+				  ? -1 : 0);
 	  stack_slot = x;
 
 	  /* Cancel the  big-endian correction done in assign_stack_local.
@@ -2245,7 +2250,7 @@ alter_reg (int i, int from_reg, bool dont_share_p)
 	      adjust = GET_MODE_SIZE (mode) - total_size;
 	      if (may_ne (adjust, 0))
 		{
-		  unsigned int total_bits = total_size * BITS_PER_UNIT;
+		  poly_uint64 total_bits = total_size * BITS_PER_UNIT;
 		  machine_mode mem_mode
 		    = int_mode_for_size (total_bits, 1).else_blk ();
 		  stack_slot = adjust_address_nv (x, mem_mode, adjust);
@@ -2818,8 +2823,8 @@ eliminate_regs_1 (rtx x, machine_mode mem_mode, rtx insn,
 
       if (new_rtx != SUBREG_REG (x))
 	{
-	  int x_size = GET_MODE_SIZE (GET_MODE (x));
-	  int new_size = GET_MODE_SIZE (GET_MODE (new_rtx));
+	  poly_int64 x_size = GET_MODE_SIZE (GET_MODE (x));
+	  poly_int64 new_size = GET_MODE_SIZE (GET_MODE (new_rtx));
 
 	  if (MEM_P (new_rtx)
 	      && ((partial_subreg_p (GET_MODE (x), GET_MODE (new_rtx))
@@ -2831,9 +2836,10 @@ eliminate_regs_1 (rtx x, machine_mode mem_mode, rtx insn,
 		      So if the number of words is the same, preserve the
 		      subreg so that push_reload can see it.  */
 		   && !(WORD_REGISTER_OPERATIONS
-			&& (x_size - 1) / UNITS_PER_WORD
-			   == (new_size -1 ) / UNITS_PER_WORD))
-		  || x_size == new_size)
+			&& known_equal_after_align_down (x_size - 1,
+							 new_size - 1,
+							 UNITS_PER_WORD)))
+		  || must_eq (x_size, new_size))
 	      )
 	    return adjust_address_nv (new_rtx, GET_MODE (x), SUBREG_BYTE (x));
 	  else if (insn && GET_CODE (insn) == DEBUG_INSN)
@@ -3000,12 +3006,12 @@ elimination_effects (rtx x, machine_mode mem_mode)
       for (ep = reg_eliminate; ep < &reg_eliminate[NUM_ELIMINABLE_REGS]; ep++)
 	if (ep->to_rtx == XEXP (x, 0))
 	  {
-	    int size = GET_MODE_SIZE (mem_mode);
+	    poly_int64 size = GET_MODE_SIZE (mem_mode);
 
 	    /* If more bytes than MEM_MODE are pushed, account for them.  */
 #ifdef PUSH_ROUNDING
 	    if (ep->to_rtx == stack_pointer_rtx)
-	      size = PUSH_ROUNDING (size);
+	      size = PUSH_ROUNDING (MACRO_INT (size));
 #endif
 	    if (code == PRE_DEC || code == POST_DEC)
 	      ep->offset += size;
