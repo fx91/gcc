@@ -1,4 +1,4 @@
-/* { dg-do run } */
+/* { dg-do run { xfail *-*-* } } */
 /* { dg-options "-O2 -floop-nest-optimize" } */
 
 int bf;
